@@ -14,6 +14,14 @@ Para cada bono (ej. `AL30` y `AL30D`) se calcula con las puntas:
 Hay oportunidad cuando `MEP venta(B) > MEP compra(A)` descontadas las comisiones:
 comprás A en pesos, lo vendés en dólares, comprás B en dólares y lo vendés en pesos.
 
+En el panel cada bono muestra el MEP de compra, el de venta y el promedio.
+
+**Cuánto invertir:** en cada oportunidad escribís los *pesos* a invertir. La app calcula los
+nominales de cada una de las 4 órdenes (IOL cotiza los bonos cada 100 nominales), los limita al
+volumen disponible en el mercado y te muestra el detalle y la ganancia estimada antes de pedirte
+confirmación. Los nominales de la 3.ª y 4.ª orden se calculan con los dólares que realmente salen
+de la 2.ª, porque los dos bonos tienen precios distintos.
+
 ## Uso
 
 ```bash

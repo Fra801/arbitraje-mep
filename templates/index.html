@@ -43,7 +43,7 @@
   <h3>Oportunidades</h3>
   <div id="opps">Buscando…</div>
   <h3>MEP implícito por bono</h3>
-  <table><thead><tr><th>Bono</th><th>MEP compra</th><th>MEP venta</th></tr></thead><tbody id="tbl"></tbody></table>
+  <table><thead><tr><th>Bono</th><th>MEP compra</th><th>MEP venta</th><th>MEP promedio</th></tr></thead><tbody id="tbl"></tbody></table>
 </section>
 </main>
 
@@ -90,7 +90,7 @@ async function refresh(){
   if(r.status===401){ doLogout(); return; }
   const s = await r.json();
   $('status').textContent = s.error ? ' Error: '+s.error : (s.ts ? ' Actualizado '+new Date(s.ts*1000).toLocaleTimeString() : '');
-  $('tbl').innerHTML = s.table.map(t=>`<tr><td>${t.symbol}</td><td>${t.mep_compra}</td><td>${t.mep_venta}</td></tr>`).join('');
+  $('tbl').innerHTML = s.table.map(t=>`<tr><td>${t.symbol}</td><td>${t.mep_compra}</td><td>${t.mep_venta}</td><td><b>${t.mep_medio}</b></td></tr>`).join('');
   const keys = new Set(s.opportunities.map(o=>o.via_usd+'>'+o.back_to_ars));
   const newOne = [...keys].some(k=>!seen.has(k));
   // no redibujar mientras el usuario escribe nominales
@@ -98,23 +98,40 @@ async function refresh(){
     $('opps').innerHTML = s.opportunities.length ? s.opportunities.map(o=>{
       const k = o.via_usd+'>'+o.back_to_ars;
       return `<div class="opp"><b>${o.via_usd} → ${o.back_to_ars}</b>: +${o.net_pct}% neto
-        (compra MEP ${o.mep_compra} / venta MEP ${o.mep_venta}) · máx. ${o.max_nominals} nominales<br>
-        <input type="number" min="1" max="${o.max_nominals}" placeholder="nominales" id="q_${k}">
-        <button onclick="doExec('${o.via_usd}','${o.back_to_ars}')">Ejecutar</button></div>`;
+        (compra MEP ${o.mep_compra} / venta MEP ${o.mep_venta}) · capital máx. ${fmt(o.max_capital_ars)}<br>
+        <input type="number" min="1" step="1000" placeholder="pesos a invertir" id="q_${k}">
+        <button onclick="doExec('${o.via_usd}','${o.back_to_ars}')">Calcular y ejecutar</button></div>`;
     }).join('') : 'Sin desarbitrajes por ahora.';
   }
   seen = keys;
   if(newOne) beep();
 }
 
+const fmt = n => '$' + Number(n).toLocaleString('es-AR', {maximumFractionDigits: 0});
+const post = (url, body) => fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+
 async function doExec(a,b){
-  const n = parseInt($('q_'+a+'>'+b).value);
-  if(!n) return alert('Indicá los nominales');
-  if(!confirm(`Se enviarán 4 órdenes límite por ${n} nominales (${a} → ${b}). ¿Confirmás?`)) return;
-  const r = await fetch('/api/execute',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({via_usd:a,back_to_ars:b,nominals:n})});
+  const capital = parseFloat($('q_'+a+'>'+b).value);
+  if(!capital) return alert('Indicá cuántos pesos querés invertir');
+  const body = {via_usd:a, back_to_ars:b, capital};
+  // 1) calcular sin operar
+  const pr = await post('/api/plan', body);
+  const p = await pr.json();
+  if(!pr.ok) return alert('Error: '+p.error);
+  const l = p.legs;
+  const msg = `${a} → ${b}\n\n` +
+    `1) Comprar ${l[0].quantity} nominales de ${l[0].symbol} a ${l[0].price}\n` +
+    `2) Vender ${l[1].quantity} de ${l[1].symbol} a ${l[1].price}\n` +
+    `3) Comprar ${l[2].quantity} de ${l[2].symbol} a ${l[2].price}\n` +
+    `4) Vender ${l[3].quantity} de ${l[3].symbol} a ${l[3].price}\n\n` +
+    `Invertís ${fmt(p.cost_ars)}${p.capped ? ' (el mercado no alcanza para todo el capital)' : ''}\n` +
+    `Ganancia estimada: ${fmt(p.profit_ars)} (${p.profit_pct}%) después de comisiones\n\n` +
+    `¿Confirmás el envío de las 4 órdenes?`;
+  if(!confirm(msg)) return;
+  // 2) ejecutar
+  const r = await post('/api/execute', body);
   const j = await r.json();
-  alert(r.ok ? (j.dry_run?'SIMULADO: ':'Enviadas: ')+j.legs.map(l=>`${l.side} ${l.symbol}`).join(' | ') : 'Error: '+j.error);
+  alert(r.ok ? (j.dry_run?'SIMULADO (no se envió nada real): ':'Órdenes enviadas: ')+j.legs.map(x=>`${x.side} ${x.quantity} ${x.symbol}`).join(' | ') : 'Error: '+j.error);
 }
 </script>
 </body>

@@ -5,7 +5,7 @@ import time
 
 from flask import Flask, jsonify, render_template, request, session
 
-from arbitrage import Quote, find_opportunities, mep_table
+from arbitrage import Quote, find_opportunities, mep_table, plan_trade
 from iol import IOLClient, IOLError
 
 app = Flask(__name__)
@@ -91,30 +91,57 @@ def state():
     return jsonify(s["state"])
 
 
+def _plan_from_request(s):
+    """Devuelve (plan, error_response) a partir de la oportunidad y el capital pedidos."""
+    j = request.get_json(force=True)
+    try:
+        capital = float(j.get("capital", 0))
+    except (TypeError, ValueError):
+        capital = 0
+    if capital <= 0:
+        return None, (jsonify(error="Indicá cuántos pesos querés invertir"), 400)
+    opp = next((o for o in s["state"]["opportunities"]
+                if o["via_usd"] == j.get("via_usd") and o["back_to_ars"] == j.get("back_to_ars")), None)
+    if not opp:
+        return None, (jsonify(error="La oportunidad ya no está vigente"), 409)
+    plan = plan_trade(opp, capital)
+    if not plan:
+        return None, (jsonify(error="Capital insuficiente o sin volumen en el mercado"), 400)
+    plan["capital_requested"] = capital
+    plan["capped"] = plan["cost_ars"] < capital * 0.98  # el mercado no alcanza para todo el capital
+    return plan, None
+
+
+@app.post("/api/plan")
+def plan():
+    """Calcula (sin operar) qué se compraría y vendería con el capital indicado."""
+    s = _current()
+    if not s:
+        return jsonify(error="no_session"), 401
+    p, err = _plan_from_request(s)
+    return err if err else jsonify(p)
+
+
 @app.post("/api/execute")
 def execute():
     s = _current()
     if not s:
         return jsonify(error="no_session"), 401
-    j = request.get_json(force=True)
-    qty = int(j.get("nominals", 0))
-    opp = next((o for o in s["state"]["opportunities"]
-                if o["via_usd"] == j.get("via_usd") and o["back_to_ars"] == j.get("back_to_ars")), None)
-    if not opp:
-        return jsonify(error="La oportunidad ya no está vigente"), 409
-    if qty <= 0 or (opp["max_nominals"] and qty > opp["max_nominals"]):
-        return jsonify(error=f"Nominales inválidos (máx. {opp['max_nominals']})"), 400
+    p, err = _plan_from_request(s)
+    if err:
+        return err
     results = []
     try:
-        for leg in opp["legs"]:
+        for leg in p["legs"]:
             if DRY_RUN:
-                results.append({**leg, "quantity": qty, "simulated": True})
+                results.append({**leg, "simulated": True})
             else:
-                r = s["client"].place_order(leg["side"], leg["symbol"], qty, leg["price"], s["plazo"])
-                results.append({**leg, "quantity": qty, "response": r})
+                r = s["client"].place_order(leg["side"], leg["symbol"], leg["quantity"],
+                                            leg["price"], s["plazo"])
+                results.append({**leg, "response": r})
     except IOLError as e:
         return jsonify(error=str(e), done=results), 502
-    return jsonify(ok=True, dry_run=DRY_RUN, legs=results)
+    return jsonify(ok=True, dry_run=DRY_RUN, legs=results, plan=p)
 
 
 if __name__ == "__main__":
