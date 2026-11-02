@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arbitraje MEP</title>
+<style>
+  body{font-family:system-ui,sans-serif;margin:0;background:#0f1419;color:#e6e6e6}
+  main{max-width:900px;margin:0 auto;padding:16px}
+  input,select,button{padding:8px;border-radius:6px;border:1px solid #333;background:#1b232c;color:#fff;margin:2px}
+  button{cursor:pointer;background:#2563eb;border:0}
+  button.alt{background:#374151}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:14px}
+  th,td{padding:6px;text-align:right;border-bottom:1px solid #222}
+  th:first-child,td:first-child{text-align:left}
+  .opp{background:#12301f;border:1px solid #1f6b3a;border-radius:8px;padding:10px;margin:8px 0}
+  .banner{background:#4a3b00;padding:8px;border-radius:6px;margin-bottom:10px}
+  .err{color:#f87171}
+  .hide{display:none}
+</style>
+</head>
+<body>
+<main>
+<h2>Arbitraje dólar MEP</h2>
+{% if dry_run %}<div class="banner">Modo simulación: no se envían órdenes reales (DRY_RUN=1).</div>{% endif %}
+
+<section id="login">
+  <p>Ingresá tus credenciales de InvertirOnline. No se guardan: solo viven en memoria mientras la sesión esté abierta.</p>
+  <input id="u" placeholder="Usuario / email" autocomplete="username">
+  <input id="p" type="password" placeholder="Contraseña" autocomplete="current-password"><br>
+  <input id="sym" value="{{ symbols }}" size="40" title="Bonos (sin la D)"><br>
+  Comisión por operación %<input id="fee" type="number" step="0.01" value="0.15" style="width:80px">
+  Ganancia mínima %<input id="min" type="number" step="0.01" value="0.3" style="width:80px">
+  Plazo<select id="plazo"><option value="t1">24hs</option><option value="t0">CI</option></select><br>
+  <button onclick="doLogin()">Conectar y monitorear</button>
+  <div id="loginErr" class="err"></div>
+</section>
+
+<section id="panel" class="hide">
+  <button class="alt" onclick="doLogout()">Salir</button>
+  <label><input type="checkbox" id="sound" checked> Sonido</label>
+  <span id="status"></span>
+  <h3>Oportunidades</h3>
+  <div id="opps">Buscando…</div>
+  <h3>MEP implícito por bono</h3>
+  <table><thead><tr><th>Bono</th><th>MEP compra</th><th>MEP venta</th></tr></thead><tbody id="tbl"></tbody></table>
+</section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let seen = new Set(), timer = null, ctx = null;
+
+function audio(){ ctx = ctx || new (window.AudioContext||window.webkitAudioContext)(); return ctx; }
+
+function beep(){
+  if(!$('sound').checked) return;
+  const c = audio();
+  [880,1175,880].forEach((f,i)=>{
+    const o=c.createOscillator(), g=c.createGain();
+    o.frequency.value=f; o.connect(g); g.connect(c.destination);
+    g.gain.value=0.25;
+    o.start(c.currentTime+i*0.25); o.stop(c.currentTime+i*0.25+0.18);
+  });
+}
+
+async function doLogin(){
+  audio(); // el clic habilita el audio del navegador
+  const body = {username:$('u').value, password:$('p').value, symbols:$('sym').value,
+    fee:$('fee').value, min_profit:$('min').value, plazo:$('plazo').value};
+  const r = await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const j = await r.json();
+  if(!r.ok){ $('loginErr').textContent=j.error; return; }
+  $('p').value=''; $('loginErr').textContent='';
+  $('login').classList.add('hide');
+  $('panel').classList.remove('hide');
+  timer = setInterval(refresh, 3000); refresh();
+}
+
+async function doLogout(){
+  clearInterval(timer);
+  await fetch('/api/logout',{method:'POST'});
+  seen = new Set();
+  $('panel').classList.add('hide');
+  $('login').classList.remove('hide');
+}
+
+async function refresh(){
+  const r = await fetch('/api/state');
+  if(r.status===401){ doLogout(); return; }
+  const s = await r.json();
+  $('status').textContent = s.error ? ' Error: '+s.error : (s.ts ? ' Actualizado '+new Date(s.ts*1000).toLocaleTimeString() : '');
+  $('tbl').innerHTML = s.table.map(t=>`<tr><td>${t.symbol}</td><td>${t.mep_compra}</td><td>${t.mep_venta}</td></tr>`).join('');
+  const keys = new Set(s.opportunities.map(o=>o.via_usd+'>'+o.back_to_ars));
+  const newOne = [...keys].some(k=>!seen.has(k));
+  // no redibujar mientras el usuario escribe nominales
+  if(!document.activeElement || document.activeElement.type!=='number' || newOne){
+    $('opps').innerHTML = s.opportunities.length ? s.opportunities.map(o=>{
+      const k = o.via_usd+'>'+o.back_to_ars;
+      return `<div class="opp"><b>${o.via_usd} → ${o.back_to_ars}</b>: +${o.net_pct}% neto
+        (compra MEP ${o.mep_compra} / venta MEP ${o.mep_venta}) · máx. ${o.max_nominals} nominales<br>
+        <input type="number" min="1" max="${o.max_nominals}" placeholder="nominales" id="q_${k}">
+        <button onclick="doExec('${o.via_usd}','${o.back_to_ars}')">Ejecutar</button></div>`;
+    }).join('') : 'Sin desarbitrajes por ahora.';
+  }
+  seen = keys;
+  if(newOne) beep();
+}
+
+async function doExec(a,b){
+  const n = parseInt($('q_'+a+'>'+b).value);
+  if(!n) return alert('Indicá los nominales');
+  if(!confirm(`Se enviarán 4 órdenes límite por ${n} nominales (${a} → ${b}). ¿Confirmás?`)) return;
+  const r = await fetch('/api/execute',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({via_usd:a,back_to_ars:b,nominals:n})});
+  const j = await r.json();
+  alert(r.ok ? (j.dry_run?'SIMULADO: ':'Enviadas: ')+j.legs.map(l=>`${l.side} ${l.symbol}`).join(' | ') : 'Error: '+j.error);
+}
+</script>
+</body>
+</html>
